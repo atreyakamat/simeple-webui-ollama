@@ -1,6 +1,6 @@
 import type { OllamaModel, StreamOptions } from '../types/chat';
 
-const BASE_URL = '/api';
+const BASE_URL = import.meta.env.DEV ? '/api' : 'http://localhost:11434/api';
 
 // ─── Connection ──────────────────────────────────────────────────────────────
 
