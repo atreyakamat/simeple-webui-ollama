@@ -2,7 +2,10 @@ import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
 import type { Chat, Message, OllamaModel } from '../types/chat';
 import { fetchModels, checkConnection, streamChat } from '../lib/ollama';
-import { getChats, saveChat, deleteChat as removeChat } from '../lib/storage';
+import { getChats, saveChat, deleteChat as removeChat, clearAllChats } from '../lib/storage';
+import { searchChats, type SearchResult } from '../lib/search';
+import { generateTitle } from '../lib/utils';
+import { useSettingsStore } from './settingsStore';
 
 interface ChatState {
     chats: Chat[];
@@ -12,15 +15,30 @@ interface ChatState {
     isConnected: boolean;
     isStreaming: boolean;
     abortController: AbortController | null;
+    searchQuery: string;
+    searchResults: SearchResult[];
 
+    // Data loading
     loadChats: () => Promise<void>;
     loadModels: () => Promise<void>;
     checkOllamaConnection: () => Promise<void>;
+
+    // Chat CRUD
     createChat: () => void;
     setActiveChat: (id: string) => void;
     deleteChat: (id: string) => Promise<void>;
+    renameChat: (id: string, title: string) => Promise<void>;
+    duplicateChat: (id: string) => Promise<void>;
+    clearChat: (id: string) => Promise<void>;
+    clearAllChats: () => Promise<void>;
+
+    // Messaging
     sendMessage: (content: string) => Promise<void>;
+    regenerateLastResponse: () => Promise<void>;
     stopStreaming: () => void;
+
+    // Search
+    setSearchQuery: (q: string) => void;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -31,6 +49,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     isConnected: false,
     isStreaming: false,
     abortController: null,
+    searchQuery: '',
+    searchResults: [],
+
+    // ─── Loading ────────────────────────────────────────────────────────────────
 
     loadChats: async () => {
         const chats = await getChats();
@@ -43,11 +65,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     loadModels: async () => {
         try {
             const models = await fetchModels();
-            set({
-                models,
-                selectedModel: models.length > 0 ? models[0].name : '',
-                isConnected: true,
-            });
+            const settings = useSettingsStore.getState().settings;
+            const preferred = settings.defaultModel;
+            const selectedModel = models.find(m => m.name === preferred)?.name ?? (models[0]?.name ?? '');
+            set({ models, selectedModel, isConnected: true });
         } catch {
             set({ models: [], isConnected: false });
         }
@@ -56,156 +77,196 @@ export const useChatStore = create<ChatState>((set, get) => ({
     checkOllamaConnection: async () => {
         const connected = await checkConnection();
         set({ isConnected: connected });
-        if (connected) {
-            await get().loadModels();
-        }
+        if (connected) await get().loadModels();
     },
+
+    // ─── Chat CRUD ──────────────────────────────────────────────────────────────
 
     createChat: () => {
         const { selectedModel } = get();
+        const now = Date.now();
         const chat: Chat = {
             id: uuidv4(),
             title: 'New Chat',
             model: selectedModel,
-            createdAt: Date.now(),
+            createdAt: now,
+            updatedAt: now,
+            archived: false,
             messages: [],
         };
-        set((state) => ({
-            chats: [chat, ...state.chats],
-            activeChatId: chat.id,
-        }));
+        set(state => ({ chats: [chat, ...state.chats], activeChatId: chat.id }));
         saveChat(chat);
     },
 
-    setActiveChat: (id: string) => {
-        set({ activeChatId: id });
-    },
+    setActiveChat: (id) => set({ activeChatId: id }),
 
-    deleteChat: async (id: string) => {
+    deleteChat: async (id) => {
         await removeChat(id);
-        set((state) => {
-            const chats = state.chats.filter((c) => c.id !== id);
-            const activeChatId =
-                state.activeChatId === id
-                    ? chats.length > 0
-                        ? chats[0].id
-                        : null
-                    : state.activeChatId;
+        set(state => {
+            const chats = state.chats.filter(c => c.id !== id);
+            const activeChatId = state.activeChatId === id
+                ? (chats[0]?.id ?? null)
+                : state.activeChatId;
             return { chats, activeChatId };
         });
     },
 
-    sendMessage: async (content: string) => {
+    renameChat: async (id, title) => {
+        set(state => {
+            const chats = state.chats.map(c =>
+                c.id === id ? { ...c, title, updatedAt: Date.now() } : c
+            );
+            return { chats };
+        });
+        const chat = get().chats.find(c => c.id === id);
+        if (chat) await saveChat(chat);
+    },
+
+    duplicateChat: async (id) => {
+        const chat = get().chats.find(c => c.id === id);
+        if (!chat) return;
+        const now = Date.now();
+        const copy: Chat = {
+            ...chat,
+            id: uuidv4(),
+            title: `${chat.title} (copy)`,
+            createdAt: now,
+            updatedAt: now,
+        };
+        set(state => ({ chats: [copy, ...state.chats], activeChatId: copy.id }));
+        await saveChat(copy);
+    },
+
+    clearChat: async (id) => {
+        const now = Date.now();
+        set(state => ({
+            chats: state.chats.map(c =>
+                c.id === id ? { ...c, messages: [], updatedAt: now } : c
+            ),
+        }));
+        const chat = get().chats.find(c => c.id === id);
+        if (chat) await saveChat(chat);
+    },
+
+    clearAllChats: async () => {
+        await clearAllChats();
+        set({ chats: [], activeChatId: null });
+    },
+
+    // ─── Messaging ──────────────────────────────────────────────────────────────
+
+    sendMessage: async (content) => {
         const { activeChatId, chats, selectedModel } = get();
         if (!activeChatId || !content.trim()) return;
 
-        const chat = chats.find((c) => c.id === activeChatId);
+        const chat = chats.find(c => c.id === activeChatId);
         if (!chat) return;
 
-        // Create user message
-        const userMessage: Message = {
-            id: uuidv4(),
-            role: 'user',
-            content: content.trim(),
-            timestamp: Date.now(),
-        };
+        const settings = useSettingsStore.getState().settings;
+        const now = Date.now();
 
-        // Auto-generate title from first user message
-        const isFirstMessage = chat.messages.length === 0;
-        const title = isFirstMessage
-            ? content.trim().slice(0, 50) + (content.trim().length > 50 ? '...' : '')
-            : chat.title;
+        const userMsg: Message = { id: uuidv4(), role: 'user', content: content.trim(), timestamp: now };
+        const assistantMsg: Message = { id: uuidv4(), role: 'assistant', content: '', timestamp: now };
 
-        // Create assistant placeholder
-        const assistantMessage: Message = {
-            id: uuidv4(),
-            role: 'assistant',
-            content: '',
-            timestamp: Date.now(),
-        };
+        const isFirst = chat.messages.length === 0;
+        const title = isFirst && settings.autoTitle ? generateTitle(content) : chat.title;
 
-        const updatedMessages = [...chat.messages, userMessage, assistantMessage];
         const updatedChat: Chat = {
             ...chat,
             title,
             model: selectedModel,
-            messages: updatedMessages,
+            updatedAt: now,
+            messages: [...chat.messages, userMsg, assistantMsg],
         };
 
-        // Update state
-        set((state) => ({
-            chats: state.chats.map((c) => (c.id === activeChatId ? updatedChat : c)),
+        set(state => ({
+            chats: state.chats.map(c => c.id === activeChatId ? updatedChat : c),
             isStreaming: true,
         }));
         await saveChat(updatedChat);
 
-        // Stream response
         const abortController = new AbortController();
         set({ abortController });
 
         try {
-            const chatMessages = updatedMessages
-                .filter((m) => m.role === 'user' || (m.role === 'assistant' && m.content))
-                .map((m) => ({ role: m.role, content: m.content }));
+            // Build message history for Ollama (include system prompt if set)
+            const history = updatedChat.messages
+                .filter(m => m.role === 'user' || (m.role === 'assistant' && m.content))
+                .map(m => ({ role: m.role as 'user' | 'assistant' | 'system', content: m.content }));
 
-            for await (const chunk of streamChat(selectedModel, chatMessages, abortController.signal)) {
-                set((state) => {
-                    const chat = state.chats.find((c) => c.id === activeChatId);
-                    if (!chat) return state;
+            if (settings.systemPrompt) {
+                history.unshift({ role: 'system', content: settings.systemPrompt });
+            }
 
-                    const messages = [...chat.messages];
-                    const lastMsg = messages[messages.length - 1];
-                    if (lastMsg && lastMsg.role === 'assistant') {
-                        messages[messages.length - 1] = {
-                            ...lastMsg,
-                            content: lastMsg.content + chunk,
-                        };
+            const streamOptions = {
+                temperature: settings.temperature,
+                top_p: settings.topP,
+                num_predict: settings.maxTokens,
+            };
+
+            for await (const chunk of streamChat(selectedModel, history, streamOptions, abortController.signal)) {
+                set(state => {
+                    const c = state.chats.find(c => c.id === activeChatId);
+                    if (!c) return state;
+                    const msgs = [...c.messages];
+                    const last = msgs[msgs.length - 1];
+                    if (last?.role === 'assistant') {
+                        msgs[msgs.length - 1] = { ...last, content: last.content + chunk };
                     }
-
-                    const updatedChat = { ...chat, messages };
-                    return {
-                        chats: state.chats.map((c) => (c.id === activeChatId ? updatedChat : c)),
-                    };
+                    return { chats: state.chats.map(x => x.id === activeChatId ? { ...c, messages: msgs } : x) };
                 });
             }
         } catch (err) {
-            if (err instanceof DOMException && err.name === 'AbortError') {
-                // User cancelled — that's fine
-            } else {
-                // Show error in assistant message
-                set((state) => {
-                    const chat = state.chats.find((c) => c.id === activeChatId);
-                    if (!chat) return state;
-
-                    const messages = [...chat.messages];
-                    const lastMsg = messages[messages.length - 1];
-                    if (lastMsg && lastMsg.role === 'assistant') {
-                        messages[messages.length - 1] = {
-                            ...lastMsg,
-                            content: lastMsg.content || `Error: ${err instanceof Error ? err.message : 'Failed to get response'}`,
+            if (!(err instanceof DOMException && err.name === 'AbortError')) {
+                set(state => {
+                    const c = state.chats.find(c => c.id === activeChatId);
+                    if (!c) return state;
+                    const msgs = [...c.messages];
+                    const last = msgs[msgs.length - 1];
+                    if (last?.role === 'assistant') {
+                        msgs[msgs.length - 1] = {
+                            ...last,
+                            content: last.content || `⚠️ Error: ${err instanceof Error ? err.message : 'Failed to get response'}`,
                         };
                     }
-
-                    const updatedChat = { ...chat, messages };
-                    return {
-                        chats: state.chats.map((c) => (c.id === activeChatId ? updatedChat : c)),
-                    };
+                    return { chats: state.chats.map(x => x.id === activeChatId ? { ...c, messages: msgs } : x) };
                 });
             }
         } finally {
-            // Save final state
-            const finalChat = get().chats.find((c) => c.id === activeChatId);
-            if (finalChat) {
-                await saveChat(finalChat);
-            }
+            const finalChat = get().chats.find(c => c.id === activeChatId);
+            if (finalChat) await saveChat(finalChat);
             set({ isStreaming: false, abortController: null });
         }
     },
 
+    regenerateLastResponse: async () => {
+        const { activeChatId, chats } = get();
+        if (!activeChatId) return;
+        const chat = chats.find(c => c.id === activeChatId);
+        if (!chat || chat.messages.length < 2) return;
+
+        // Remove last assistant message
+        const msgs = [...chat.messages];
+        if (msgs[msgs.length - 1]?.role === 'assistant') msgs.pop();
+        const lastUserMsg = msgs[msgs.length - 1];
+        if (!lastUserMsg || lastUserMsg.role !== 'user') return;
+
+        const now = Date.now();
+        const updatedChat = { ...chat, messages: msgs, updatedAt: now };
+        set(state => ({ chats: state.chats.map(c => c.id === activeChatId ? updatedChat : c) }));
+        await saveChat(updatedChat);
+
+        await get().sendMessage(lastUserMsg.content);
+    },
+
     stopStreaming: () => {
-        const { abortController } = get();
-        if (abortController) {
-            abortController.abort();
-        }
+        get().abortController?.abort();
+    },
+
+    // ─── Search ─────────────────────────────────────────────────────────────────
+
+    setSearchQuery: (q) => {
+        const results = searchChats(get().chats, q);
+        set({ searchQuery: q, searchResults: results });
     },
 }));

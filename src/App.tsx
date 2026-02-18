@@ -1,28 +1,19 @@
-import { useEffect } from 'react';
-import { useChatStore } from './store/chatStore';
-import { Sidebar } from './components/Sidebar';
-import { ChatArea } from './components/ChatArea';
+import { Routes, Route, Navigate } from 'react-router-dom';
+import { LandingPage } from './components/LandingPage';
+import { AppLayout } from './components/AppLayout';
+import { useOllamaConnection } from './hooks/useOllamaConnection';
+import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 
 export default function App() {
-  const loadModels = useChatStore((s) => s.loadModels);
-  const loadChats = useChatStore((s) => s.loadChats);
-
-  useEffect(() => {
-    loadModels();
-    loadChats();
-
-    // Periodically check connection
-    const interval = setInterval(() => {
-      useChatStore.getState().checkOllamaConnection();
-    }, 30000);
-
-    return () => clearInterval(interval);
-  }, [loadModels, loadChats]);
+  // Initialize connection polling and keyboard shortcuts globally
+  useOllamaConnection();
+  useKeyboardShortcuts();
 
   return (
-    <div className="flex h-screen overflow-hidden">
-      <Sidebar />
-      <ChatArea />
-    </div>
+    <Routes>
+      <Route path="/" element={<LandingPage />} />
+      <Route path="/chat" element={<AppLayout />} />
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
   );
 }
