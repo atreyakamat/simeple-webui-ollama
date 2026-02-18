@@ -1,15 +1,15 @@
 import type { OllamaModel, StreamOptions } from '../types/chat';
 
-// In Tauri production builds, use the absolute 127.0.0.1 address.
-// 127.0.0.1 is more reliable than 'localhost' on Windows WebView2 (avoids IPv6 resolution issues).
-// In browser dev mode, use the Vite proxy (/api → localhost:11434).
-const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-const BASE_URL = isTauri ? 'http://127.0.0.1:11434/api' : '/api';
+// Ollama sends Access-Control-Allow-Origin: * by default, so direct fetch works
+// from any origin (browser dev, Tauri dev, Tauri production).
+// We always use the absolute URL — no Vite proxy dependency.
+// 127.0.0.1 is used instead of 'localhost' to avoid IPv6 resolution issues on Windows.
+const OLLAMA_URL = 'http://127.0.0.1:11434/api';
 
 // ─── Connection ──────────────────────────────────────────────────────────────
 
 export async function fetchModels(): Promise<OllamaModel[]> {
-    const res = await fetch(`${BASE_URL}/tags`, { signal: AbortSignal.timeout(5000) });
+    const res = await fetch(`${OLLAMA_URL}/tags`, { signal: AbortSignal.timeout(5000) });
     if (!res.ok) throw new Error('Failed to fetch models');
     const data = await res.json();
     return data.models ?? [];
@@ -51,7 +51,7 @@ export async function* streamChat(
         };
     }
 
-    const res = await fetch(`${BASE_URL}/chat`, {
+    const res = await fetch(`${OLLAMA_URL}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
