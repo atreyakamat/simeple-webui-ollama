@@ -1,6 +1,10 @@
 import type { OllamaModel, StreamOptions } from '../types/chat';
 
-const BASE_URL = import.meta.env.DEV ? '/api' : 'http://localhost:11434/api';
+// In Tauri production builds, use the absolute 127.0.0.1 address.
+// 127.0.0.1 is more reliable than 'localhost' on Windows WebView2 (avoids IPv6 resolution issues).
+// In browser dev mode, use the Vite proxy (/api → localhost:11434).
+const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+const BASE_URL = isTauri ? 'http://127.0.0.1:11434/api' : '/api';
 
 // ─── Connection ──────────────────────────────────────────────────────────────
 
