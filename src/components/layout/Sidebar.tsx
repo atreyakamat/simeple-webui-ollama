@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { useChatStore } from '../../store/chatStore';
 import { useUIStore } from '../../store/uiStore';
-import { IconButton } from '../common/IconButton';
 import { cn, formatTimestamp } from '../../lib/utils';
 import type { Chat } from '../../types/chat';
 
